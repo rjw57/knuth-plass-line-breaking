@@ -18,3 +18,4 @@ class ParagraphItem:
     shrinkability: float = 0.0
     penalty: float = 0.0
     flagged: bool = False
+    text: str = ""
