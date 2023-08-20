@@ -1,0 +1,52 @@
+[tool.poetry]
+name = "typesetting"
+version = "0.1.0"
+description = ""
+authors = ["Rich Wareham <rich@richwareham.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{include="typesetting"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+wcwidth = "^0.2.6"
+uniseg = "^0.7.2"
+sortedcontainers = "^2.4.0"
+pyhyphen = "^4.0.3"
+pillow = "^10.0.0"
+uharfbuzz = "^0.37.2"
+freetype-py = "^2.4.0"
+pycairo = "^1.24.0"
+
+
+[tool.poetry.group.dev.dependencies]
+jupyterlab = "^4.0.5"
+ipython = "^8.14.0"
+faker = "^19.3.0"
+pre-commit = "^3.3.3"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.mypy]
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 99
+
+[tool.coverage.run]
+omit= [
+  ".tox/*",
+  "setup.py",
+  "manage.py",
+  "gunicorn.conf.py",
+  "*/test/*",
+  "*/tests/*",
+  "*/migrations/*",
+  "{{ cookiecutter.project_module }}/settings/*",
+  "{{ cookiecutter.project_module }}/wsgi.py",
+]
+
+[tool.isort]
+profile = "black"
