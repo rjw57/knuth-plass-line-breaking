@@ -1,11 +1,10 @@
 import dataclasses
 import typing
-from typing import Sequence
+from collections.abc import Generator
 
 import freetype
 import uniseg.graphemecluster
-
-from ._raqm import Raqm
+import uharfbuzz as hb
 
 __all__ = ["Font", "Glyph"]
 
@@ -23,6 +22,7 @@ class Font:
     features: typing.Sequence[str] = ()
     language: str = "en"
     freetype_face: freetype.Face = dataclasses.field(init=False)
+    harfbuzz_font: hb.Font = dataclasses.field(init=False)
 
     def __post_init__(self):
         object.__setattr__(self, "freetype_face", freetype.Face(self.path))
@@ -33,7 +33,13 @@ class Font:
             self.dpi[1],
         )
 
-    def shape(self, text: str) -> Sequence["Glyph"]:
+        blob = hb.Blob.from_file_path(self.path)
+        face = hb.Face(blob)
+        object.__setattr__(self, "harfbuzz_font", hb.Font(face))
+        self.harfbuzz_font.ptem = self.em_size[1]
+        self.harfbuzz_font.ppem = tuple(self.em_size[i] * self.dpi[i] / 72.0 for i in range(2))
+
+    def shape(self, text: str) -> Generator["Glyph", None, None]:
         # Split text into grapheme clusters.
         clusters_by_idx, cluster_code_point_indices_by_idx = {}, {}
         idx, cp_idx = 0, 0
@@ -43,27 +49,24 @@ class Font:
             idx += len(cluster.encode("utf8"))
             cp_idx += len(cluster)
 
-        # Layout text.
-        r = Raqm()
-        assert r.set_text_utf8(text.encode("utf8"))
-        assert r.set_freetype_face(self.freetype_face)
-        for f in self.features:
-            assert r.add_font_feature(f)
-        assert r.layout()
+        buf = hb.Buffer()
+        buf.add_str(text)
+        buf.guess_segment_properties()
 
-        # Return gyphs and clusters for that glyph.
-        return [
-            Glyph(
-                index=g.index,
-                cluster=clusters_by_idx[g.cluster],
-                cluster_code_point_index=cluster_code_point_indices_by_idx[g.cluster],
-                x_advance=g.x_advance / 64.0,
-                y_advance=g.y_advance / 64.0,
-                x_offset=g.x_offset / 64.0,
-                y_offset=g.y_offset / 64.0,
+        hb.shape(self.harfbuzz_font, buf, {f: True for f in self.features})
+        infos = buf.glyph_infos
+        positions = buf.glyph_positions
+
+        for info, pos in zip(infos, positions):
+            yield Glyph(
+                index=info.cluster,
+                cluster=clusters_by_idx[info.cluster],
+                cluster_code_point_index=cluster_code_point_indices_by_idx[info.cluster],
+                x_advance=pos.x_advance * 1e-3 * self.em_size[0],
+                y_advance=pos.y_advance * 1e-3 * self.em_size[1],
+                x_offset=pos.x_offset * 1e-3 * self.em_size[0],
+                y_offset=pos.y_offset * 1e-3 * self.em_size[1],
             )
-            for g in r.get_glyphs() or []
-        ]
 
     @property
     def ascender(self):

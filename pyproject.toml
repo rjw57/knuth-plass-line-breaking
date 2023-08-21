@@ -13,10 +13,12 @@ wcwidth = "^0.2.6"
 uniseg = "^0.7.2"
 sortedcontainers = "^2.4.0"
 pyhyphen = "^4.0.3"
-pillow = "^10.0.0"
 uharfbuzz = "^0.37.2"
+fpdf2 = "^2.7.5"
+cairocffi = "^1.6.1"
 freetype-py = "^2.4.0"
-pycairo = "^1.24.0"
+qahirah = "^1.1"
+python-freetype = "^0.6"
 
 
 [tool.poetry.group.dev.dependencies]
