@@ -1,5 +1,6 @@
 import dataclasses
 import enum
+import math
 from collections import namedtuple
 from typing import TYPE_CHECKING, Generator, Iterable
 
@@ -76,15 +77,15 @@ def text_to_paragraph_items(text: str, font: "Font") -> Generator[ParagraphItem,
             yield ParagraphItem(
                 item_type=ParagraphItemType.GLUE,
                 width=space_width,
-                shrinkability=0.5 * space_width,
-                stretchability=2.0 * space_width,
+                shrinkability=0.66 * space_width,
+                stretchability=1.66 * space_width,
                 text=" ",
             )
 
     # Add finishing glue and forced break
     yield ParagraphItem(
         item_type=ParagraphItemType.GLUE,
-        stretchability=MAX_PENALTY,
+        stretchability=math.inf,
     )
     yield ParagraphItem(
         item_type=ParagraphItemType.PENALTY,
