@@ -59,7 +59,7 @@ class Font:
 
         for info, pos in zip(infos, positions):
             yield Glyph(
-                index=info.cluster,
+                index=info.codepoint,
                 cluster=clusters_by_idx[info.cluster],
                 cluster_code_point_index=cluster_code_point_indices_by_idx[info.cluster],
                 x_advance=pos.x_advance * 1e-3 * self.em_size[0],

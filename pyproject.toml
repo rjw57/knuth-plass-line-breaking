@@ -19,6 +19,8 @@ cairocffi = "^1.6.1"
 freetype-py = "^2.4.0"
 qahirah = "^1.1"
 python-freetype = "^0.6"
+vharfbuzz = "^0.2.0"
+pycairo = "^1.24.0"
 
 
 [tool.poetry.group.dev.dependencies]
