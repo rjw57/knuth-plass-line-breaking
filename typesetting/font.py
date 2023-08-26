@@ -2,7 +2,6 @@ import dataclasses
 import typing
 from collections.abc import Generator
 
-import freetype
 import uharfbuzz as hb
 import uniseg.graphemecluster
 
@@ -21,18 +20,9 @@ class Font:
     dpi: tuple[int, int] = (72, 72)
     features: typing.Sequence[str] = ()
     language: str = "en"
-    freetype_face: freetype.Face = dataclasses.field(init=False)
     harfbuzz_font: hb.Font = dataclasses.field(init=False)
 
     def __post_init__(self):
-        object.__setattr__(self, "freetype_face", freetype.Face(self.path))
-        self.freetype_face.set_char_size(
-            int(self.em_size[0] * 64),
-            int(self.em_size[1] * 64),
-            self.dpi[0],
-            self.dpi[1],
-        )
-
         blob = hb.Blob.from_file_path(self.path)
         face = hb.Face(blob)
         object.__setattr__(self, "harfbuzz_font", hb.Font(face))
@@ -57,26 +47,17 @@ class Font:
         infos = buf.glyph_infos
         positions = buf.glyph_positions
 
+        upem_scale = 1.0 / self.harfbuzz_font.face.upem
         for info, pos in zip(infos, positions):
             yield Glyph(
                 index=info.codepoint,
                 cluster=clusters_by_idx[info.cluster],
                 cluster_code_point_index=cluster_code_point_indices_by_idx[info.cluster],
-                x_advance=pos.x_advance * 1e-3 * self.em_size[0],
-                y_advance=pos.y_advance * 1e-3 * self.em_size[1],
-                x_offset=pos.x_offset * 1e-3 * self.em_size[0],
-                y_offset=pos.y_offset * 1e-3 * self.em_size[1],
+                x_advance=pos.x_advance * upem_scale * self.em_size[0],
+                y_advance=pos.y_advance * upem_scale * self.em_size[1],
+                x_offset=pos.x_offset * upem_scale * self.em_size[0],
+                y_offset=pos.y_offset * upem_scale * self.em_size[1],
             )
-
-    @property
-    def ascender(self):
-        "Font ascender in points."
-        return self.freetype_face.ascender / self.freetype_face.units_per_EM * self.em_size[1]
-
-    @property
-    def descender(self):
-        "Font descender in points."
-        return self.freetype_face.descender / self.freetype_face.units_per_EM * self.em_size[1]
 
 
 @dataclasses.dataclass(frozen=True)
