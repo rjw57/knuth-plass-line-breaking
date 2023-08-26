@@ -1,7 +1,7 @@
 import ctypes as ct
-from freetype import FT_Face
 
 import cairo
+from freetype import FT_Face
 
 CAIRO_STATUS_SUCCESS = 0
 FT_Err_Ok = 0

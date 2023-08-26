@@ -3,8 +3,8 @@ import typing
 from collections.abc import Generator
 
 import freetype
-import uniseg.graphemecluster
 import uharfbuzz as hb
+import uniseg.graphemecluster
 
 __all__ = ["Font", "Glyph"]
 
