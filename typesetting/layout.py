@@ -1,6 +1,5 @@
 import dataclasses
 import enum
-import math
 from collections import namedtuple
 from typing import TYPE_CHECKING, Generator, Iterable
 
@@ -40,6 +39,7 @@ class ParagraphItem:
 
 SOFT_HYPHEN_PENALTY = 50
 MAX_PENALTY = 1000  # penalties behyong this are viewed as "infinite".
+MAX_STRETCH = 100000
 
 
 def _text_width(text: str, font: "Font") -> float:
@@ -53,7 +53,7 @@ def text_to_paragraph_items(text: str, font: "Font") -> Generator[ParagraphItem,
     running_width: float = 0.0
     running_stems: list[str] = []
     for lb_item in uniseg.linebreak.line_break_units(text):
-        stem = lb_item.rstrip(f" {SOFT_HYPHEN}")
+        stem = lb_item.rstrip(f" {SOFT_HYPHEN}\n")
         if len(stem) > 0:
             running_stems.append(stem)
             stem_width = _text_width("".join(running_stems), font) - running_width
@@ -65,6 +65,7 @@ def text_to_paragraph_items(text: str, font: "Font") -> Generator[ParagraphItem,
             )
         else:
             running_stems, running_width = [], 0.0
+
         if lb_item.endswith(SOFT_HYPHEN):
             yield ParagraphItem(
                 item_type=ParagraphItemType.PENALTY,
@@ -72,6 +73,16 @@ def text_to_paragraph_items(text: str, font: "Font") -> Generator[ParagraphItem,
                 penalty=SOFT_HYPHEN_PENALTY,
                 flagged=True,
                 text="-",
+            )
+        elif lb_item.endswith("\n"):
+            yield ParagraphItem(
+                item_type=ParagraphItemType.GLUE,
+                stretchability=MAX_STRETCH,
+            )
+            yield ParagraphItem(
+                item_type=ParagraphItemType.PENALTY,
+                penalty=-MAX_PENALTY,
+                flagged=True,
             )
         elif lb_item.endswith(" "):
             yield ParagraphItem(
@@ -85,7 +96,7 @@ def text_to_paragraph_items(text: str, font: "Font") -> Generator[ParagraphItem,
     # Add finishing glue and forced break
     yield ParagraphItem(
         item_type=ParagraphItemType.GLUE,
-        stretchability=math.inf,
+        stretchability=MAX_STRETCH,
     )
     yield ParagraphItem(
         item_type=ParagraphItemType.PENALTY,
