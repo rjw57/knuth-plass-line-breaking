@@ -77,8 +77,8 @@ def text_to_paragraph_items(text: str, font: "Font") -> Generator[ParagraphItem,
             yield ParagraphItem(
                 item_type=ParagraphItemType.GLUE,
                 width=space_width,
-                shrinkability=0.66 * space_width,
-                stretchability=1.66 * space_width,
+                shrinkability=0.3 * space_width,
+                stretchability=0.5 * space_width,
                 text=" ",
             )
 
