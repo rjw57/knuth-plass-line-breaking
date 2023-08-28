@@ -76,8 +76,10 @@ class OptimiserParameters(NamedTuple):
 
 
 def adjustment_ratio_for_line(
-    prev_sums: RunningSum, break_point: BreakPoint, width: float
+    prev_break_point: Optional[BreakPoint], break_point: BreakPoint, width: float
 ) -> float:
+    prev_sums = prev_break_point.running_sum if prev_break_point is not None else RunningSum()
+
     # Compute natural width of line.
     natural_width = break_point.running_sum.width - prev_sums.width
     if break_point.item.item_type == ParagraphItemType.PENALTY:
@@ -179,22 +181,13 @@ def optimal_line_breaks(
     params = params if params is not None else OptimiserParameters()
     active_nodes: dict[NodeKey, NodeData] = {}
 
-    # Zero running sum
-    zero_sum = RunningSum()
-
     # Add an active node corresponding to the start of the paragraph.
     active_nodes[NodeKey()] = NodeData()
 
     for break_point in potential_breaks(para_items):
         # We have to copy active_nodes.items() since we modify the dict inside the loop.
         for node_key, node_data in list(active_nodes.items()):
-            prev_running_sum = (
-                node_data.break_point.running_sum
-                if node_data.break_point is not None
-                else zero_sum
-            )
-            adjustment_ratio = adjustment_ratio_for_line(prev_running_sum, break_point, width)
-            fitness_class = fitness_class_for_adjustment_ratio(adjustment_ratio)
+            adjustment_ratio = adjustment_ratio_for_line(node_data.break_point, break_point, width)
 
             # Deactivate nodes where we're considering endpoints so far away that glue would have
             # to be shrunken too far or if this breakpoint is a forced breakpoint and so later
@@ -207,37 +200,36 @@ def optimal_line_breaks(
                 if len(active_nodes) == 0:
                     adjustment_ratio = -1.0
 
-            # Compute additional demerit if we were to break here.
-            demerit = line_demerit(
-                params,
-                node_data.break_point,
-                break_point,
-                adjustment_ratio,
-                fitness_class,
-                node_key.fitness_class,
-            )
-
-            # Compute total demerits from breaking here.
-            total_demerits = demerit + node_data.total_demerits
-
-            break_node_key = NodeKey(
-                line_idx=node_key.line_idx + 1,
-                item_idx=break_point.item_idx,
-                fitness_class=fitness_class,
-            )
-            break_node_data = NodeData(
-                break_point=break_point,
-                total_demerits=total_demerits,
-                previous=(node_key, node_data),
-            )
-
             # If this line is not stretched or shrunk too much, record it as a feasible breakpoint.
             if adjustment_ratio >= -1.0 and adjustment_ratio < params.upper_adjustment_ratio:
+                fitness_class = fitness_class_for_adjustment_ratio(adjustment_ratio)
+
+                # Compute additional demerit if we were to break here.
+                demerit = line_demerit(
+                    params,
+                    node_data.break_point,
+                    break_point,
+                    adjustment_ratio,
+                    fitness_class,
+                    node_key.fitness_class,
+                )
+
+                # Compute total demerits from breaking here.
+                total_demerits = demerit + node_data.total_demerits
+
+                break_node_key = NodeKey(
+                    line_idx=node_key.line_idx + 1,
+                    item_idx=break_point.item_idx,
+                    fitness_class=fitness_class,
+                )
+
                 existing_data = active_nodes.get(break_node_key)
-                if (
-                    existing_data is None
-                    or existing_data.total_demerits > break_node_data.total_demerits
-                ):
+                if existing_data is None or existing_data.total_demerits > total_demerits:
+                    break_node_data = NodeData(
+                        break_point=break_point,
+                        total_demerits=total_demerits,
+                        previous=(node_key, node_data),
+                    )
                     active_nodes[break_node_key] = break_node_data
 
     # Find the optimal remaining active node.
