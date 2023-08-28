@@ -1,7 +1,6 @@
 import dataclasses
 import enum
 import math
-from collections import namedtuple
 from typing import TYPE_CHECKING, Generator, Iterable
 
 import uniseg.linebreak
@@ -16,7 +15,6 @@ __all__ = [
     "ParagraphItem",
     "text_to_paragraph_items",
     "MAX_PENALTY",
-    "paragraph_item_running_sums",
     "greedy_line_breaks",
 ]
 
@@ -106,51 +104,37 @@ def text_to_paragraph_items(text: str, font: "Font") -> Generator[ParagraphItem,
     )
 
 
-RunningSum = namedtuple("RunningSum", ["width", "shrinkability", "stretchability"])
-
-
-def paragraph_item_running_sums(
-    para_items: Iterable[ParagraphItem],
-) -> Generator[RunningSum, None, None]:
-    previous_sum = RunningSum(0, 0, 0)
-    yield previous_sum
-    for item in para_items:
-        if item.item_type != ParagraphItemType.PENALTY:
-            previous_sum = RunningSum(
-                width=previous_sum.width + item.width,
-                shrinkability=previous_sum.shrinkability + item.shrinkability,
-                stretchability=previous_sum.stretchability + item.stretchability,
-            )
-        yield previous_sum
-
-
 def greedy_line_breaks(
     para_items: Iterable[ParagraphItem], width: float
 ) -> Generator[int, None, None]:
     "Return sequence of indices in para_items for line breaks."
-    sums = list(paragraph_item_running_sums(para_items))
-    current_start_idx = 0
+    feasible_break_idx_and_items = []
+    prev_was_box = False
+    sum_widths = [0.0]
     for item_idx, item in enumerate(para_items):
-        # Don't break lines at boxes.
-        if item.item_type == ParagraphItemType.BOX:
-            continue
+        if item.item_type != ParagraphItemType.PENALTY:
+            sum_widths.append(sum_widths[-1] + item.width)
+        else:
+            sum_widths.append(sum_widths[-1])
 
-        # Forced break
+        if item.item_type == ParagraphItemType.PENALTY and item.penalty < MAX_PENALTY:
+            feasible_break_idx_and_items.append((item_idx, item))
+        elif item.item_type == ParagraphItemType.GLUE and prev_was_box:
+            feasible_break_idx_and_items.append((item_idx, item))
+
+        prev_was_box = item.item_type == ParagraphItemType.BOX
+
+    current_start_idx = 0
+    for break_idx, (item_idx, item) in enumerate(feasible_break_idx_and_items):
         if item.penalty <= -MAX_PENALTY:
+            # forced break
             yield item_idx
             current_start_idx = item_idx + 1
-            continue
-
-        # Compute natural width and total stretch/shrinkability
-        line_width = sums[item_idx].width - sums[current_start_idx].width
-        if item.item_type == ParagraphItemType.PENALTY:
-            line_width += item.width
-        line_stretchability = (
-            sums[item_idx].stretchability - sums[current_start_idx].stretchability
-        )
-
-        if line_width + line_stretchability < width:
-            continue
-
-        yield item_idx
-        current_start_idx = item_idx + 1
+        elif break_idx < len(feasible_break_idx_and_items) - 1:
+            next_item_idx, next_item = feasible_break_idx_and_items[break_idx + 1]
+            natural_width = sum_widths[next_item_idx] - sum_widths[current_start_idx]
+            if next_item.item_type == ParagraphItemType.PENALTY:
+                natural_width += next_item.width
+            if natural_width > width:
+                yield item_idx
+                current_start_idx = item_idx + 1
