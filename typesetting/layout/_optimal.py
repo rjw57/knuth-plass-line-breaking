@@ -1,9 +1,6 @@
-import dataclasses
 import enum
 import math
-from typing import Generator, Iterable, Optional
-
-from sortedcontainers import SortedDict
+from typing import Generator, Iterable, NamedTuple, Optional
 
 from ._types import MAX_PENALTY, ParagraphItem, ParagraphItemType
 
@@ -17,16 +14,14 @@ class FitnessClass(enum.IntEnum):
     VERY_LOOSE = 3
 
 
-@dataclasses.dataclass(frozen=True, eq=True)
-class RunningSum:
+class RunningSum(NamedTuple):
     "Running sums of line widths, stretch and shrink."
     width: float = 0.0
     stretch: float = 0.0
     shrink: float = 0.0
 
 
-@dataclasses.dataclass(frozen=True, eq=True)
-class BreakPoint:
+class BreakPoint(NamedTuple):
     "Record of a break point."
     # Index of paragraph item at break point and the item itself. An index of -1 and an item of
     # None corresponds to the start of the paragraph.
@@ -37,8 +32,7 @@ class BreakPoint:
     running_sum: RunningSum
 
 
-@dataclasses.dataclass(frozen=True, eq=True, order=True)
-class NodeKey:
+class NodeKey(NamedTuple):
     "Unique key for search node."
 
     # Index of line this break appears on. -1 == start of para
@@ -51,8 +45,7 @@ class NodeKey:
     fitness_class: FitnessClass = FitnessClass.NORMAL
 
 
-@dataclasses.dataclass(frozen=True, eq=True)
-class NodeData:
+class NodeData(NamedTuple):
     "Data associated with a particular path to a search node."
 
     # The break point itself. If None, this node represents a virtual break which starts the
@@ -66,8 +59,7 @@ class NodeData:
     previous: Optional[tuple[NodeKey, "NodeData"]] = None
 
 
-@dataclasses.dataclass(frozen=True, eq=True)
-class OptimiserParameters:
+class OptimiserParameters(NamedTuple):
     "Parameters for optimisation algorithm."
 
     # Maximum adjustment ratio for a break to be considered "feasible".
@@ -140,11 +132,11 @@ def line_demerit(
 
     # Compute demerit for this line.
     if is_forced_break:
-        return (1.0 + 100.0 * (abs(adjustment_ratio) ** 3.0)) ** 2.0
+        return (1.0 + 100.0 * (abs(adjustment_ratio) ** 3)) ** 2
     elif penalty >= 0.0:
-        return (1.0 + 100.0 * (abs(adjustment_ratio) ** 3.0) + penalty) ** 2.0
+        return (1.0 + 100.0 * (abs(adjustment_ratio) ** 3) + penalty) ** 2
     else:
-        return (1.0 + 100.0 * (abs(adjustment_ratio) ** 3.0)) ** 2.0 - (penalty**2.0)
+        return (1.0 + 100.0 * (abs(adjustment_ratio) ** 3)) ** 2 - (penalty**2)
 
 
 def potential_breaks(para_items: Iterable[ParagraphItem]) -> Generator[BreakPoint, None, None]:
@@ -185,20 +177,21 @@ def optimal_line_breaks(
     para_items: Iterable[ParagraphItem], width: float, params: Optional[OptimiserParameters] = None
 ) -> Generator[int, None, None]:
     params = params if params is not None else OptimiserParameters()
-    active_nodes: SortedDict[NodeKey, NodeData] = SortedDict()
+    active_nodes: dict[NodeKey, NodeData] = {}
+
+    # Zero running sum
+    zero_sum = RunningSum()
 
     # Add an active node corresponding to the start of the paragraph.
     active_nodes[NodeKey()] = NodeData()
 
     for break_point in potential_breaks(para_items):
-        feasible_breaks: set[tuple[NodeKey, NodeData]] = set()
-        nodes_to_deactivate: set[NodeKey] = set()
-
-        for node_key, node_data in active_nodes.items():
+        # We have to copy active_nodes.items() since we modify the dict inside the loop.
+        for node_key, node_data in list(active_nodes.items()):
             prev_running_sum = (
                 node_data.break_point.running_sum
                 if node_data.break_point is not None
-                else RunningSum()
+                else zero_sum
             )
             adjustment_ratio = adjustment_ratio_for_line(prev_running_sum, break_point, width)
             fitness_class = fitness_class_for_adjustment_ratio(adjustment_ratio)
@@ -207,11 +200,11 @@ def optimal_line_breaks(
             # to be shrunken too far or if this breakpoint is a forced breakpoint and so later
             # lines could never start at the node.
             if adjustment_ratio < -1.0 or break_point.item.penalty <= -MAX_PENALTY:
-                nodes_to_deactivate.add(node_key)
+                del active_nodes[node_key]
 
-                # If this would remove all active nodes, make sure we record the next break as
-                # feasible. This is a "break of last resort" to make sure we find _some_ solution.
-                if len(nodes_to_deactivate) == len(active_nodes):
+                # If this removes all active nodes, make sure we record the next break as feasible.
+                # This is a "break of last resort" to make sure we find _some_ solution.
+                if len(active_nodes) == 0:
                     adjustment_ratio = -1.0
 
             # Compute additional demerit if we were to break here.
@@ -240,17 +233,12 @@ def optimal_line_breaks(
 
             # If this line is not stretched or shrunk too much, record it as a feasible breakpoint.
             if adjustment_ratio >= -1.0 and adjustment_ratio < params.upper_adjustment_ratio:
-                feasible_breaks.add((break_node_key, break_node_data))
-
-        # Deactivate nodes we no-longer need.
-        for nk in nodes_to_deactivate:
-            del active_nodes[nk]
-
-        # Activate best feasible breaks.
-        for nk, nd in feasible_breaks:
-            existing_data = active_nodes.get(nk)
-            if existing_data is None or existing_data.total_demerits > nd.total_demerits:
-                active_nodes[nk] = nd
+                existing_data = active_nodes.get(break_node_key)
+                if (
+                    existing_data is None
+                    or existing_data.total_demerits > break_node_data.total_demerits
+                ):
+                    active_nodes[break_node_key] = break_node_data
 
     # Find the optimal remaining active node.
     assert len(active_nodes) > 0

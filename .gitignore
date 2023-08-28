@@ -114,3 +114,6 @@ venv.bak/
 .DS_Store
 .ipynb_checkpoints/
 *.pdf
+profile.dot
+prun0
+prun.stats
