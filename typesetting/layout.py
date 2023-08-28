@@ -1,5 +1,6 @@
 import dataclasses
 import enum
+import math
 from collections import namedtuple
 from typing import TYPE_CHECKING, Generator, Iterable
 
@@ -38,7 +39,7 @@ class ParagraphItem:
 
 
 SOFT_HYPHEN_PENALTY = 50
-MAX_PENALTY = 1000  # penalties behyong this are viewed as "infinite".
+MAX_PENALTY = math.inf  # penalties behyong this are viewed as "infinite".
 MAX_STRETCH = 100000
 
 

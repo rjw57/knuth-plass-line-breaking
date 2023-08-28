@@ -46,6 +46,8 @@ class Font:
         hb.shape(self.harfbuzz_font, buf, {f: True for f in self.features})
         infos = buf.glyph_infos
         positions = buf.glyph_positions
+        if infos is None or positions is None:
+            return
 
         upem_scale = 1.0 / self.harfbuzz_font.face.upem
         for info, pos in zip(infos, positions):
