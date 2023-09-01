@@ -1,0 +1,538 @@
+import { hyphenateSync } from "hyphen/en";
+import { createIntlSegmenterPolyfill } from "intl-segmenter-polyfill/dist/bundled";
+
+const unwrap = (text: string) => text.replaceAll("\n", " ");
+const paragraphs = [
+  `I call our world Flatland, not because we call it so, but to make its nature clearer to you, my
+happy readers, who are privileged to live in Space.`,
+  `Imagine a vast sheet of paper on which straight Lines, Triangles, Squares, Pentagons, Hexagons,
+and other figures, instead of remaining fixed in their places, move freely about, on or in the
+surface, but without the power of rising above or sinking below it, very much like
+shadows\u00A0—\u00A0only hard with luminous edges\u00A0—\u00A0and you will then have a pretty
+correct notion of my country and countrymen. Alas, a few years ago, I should have said “my
+universe”:\u00A0but now my mind has been opened to higher views of things.`,
+  `In such a country, you will perceive at once that it is impossible that there should be anything
+of what you call a “solid” kind; but I dare say you will suppose that we could at least distinguish
+by sight the Triangles, Squares, and other figures, moving about as I have described them. On the
+contrary, we could see nothing of the kind, not at least so as to distinguish one figure from
+another. Nothing was visible, nor could be visible, to us, except Straight Lines; and the necessity
+of this I will speedily demonstrate.`,
+  `Place a penny on the middle of one of your tables in Space; and leaning over it, look down upon
+it. It will appear a circle.`,
+  `But now, drawing back to the edge of the table, gradually lower your eye (thus bringing yourself
+more and more into the condition of the inhabitants of Flatland), and you will find the penny
+becoming more and more oval to your view, and at last when you have placed your eye exactly on the
+edge of the table (so that you are, as it were, actually a Flatlander) the penny will then have
+ceased to appear oval at all, and will have become, so far as you can see, a straight line.`,
+  `The same thing would happen if you were to treat in the same way a Triangle, or a Square, or any
+other figure cut out from pasteboard. As soon as you look at it with your eye on the edge of the
+table, you will find that it ceases to appear to you as a figure, and that it becomes in appearance
+a straight line. Take for example an equilateral Triangle\u00A0—\u00A0who represents with us a
+Tradesman of the respectable class. Figure\u00A01 represents the Flatland Tradesman as you would
+see him while you were bending over him from above; figures\u00A02 and 3 represent the Tradesman,
+as you would see him if your eye were close to the level, or all but on the level of the table; and
+if your eye were quite on the level of the table (and that is how we see him in Flatland) you would
+see nothing but a straight line.`,
+].map((s) => hyphenateSync(unwrap(s)));
+
+const MAX_STRETCH = 100000;
+
+const MAX_PENALTY = Infinity;
+const HYPHEN_PENALTY = 10.0;
+const LINE_PENALTY = 10.0;
+
+interface Box {
+  type: "box";
+  width: number;
+  font: string;
+  text: string;
+}
+
+interface Glue {
+  type: "glue";
+  width: number;
+  penalty: number;
+  stretchability: number;
+  shrinkability: number;
+}
+
+interface Penalty {
+  type: "penalty";
+  width: number;
+  penalty: number;
+  flagged: boolean;
+  font?: string;
+  text?: string;
+}
+
+export type ParagraphItem = Box | Glue | Penalty;
+
+function* textToParagraphItems(
+  text: string,
+  ctx: CanvasRenderingContext2D,
+  font: string,
+  sentenceSegmenter: Intl.Segmenter,
+  wordSegmenter: Intl.Segmenter,
+): Generator<ParagraphItem> {
+  ctx.save();
+  try {
+    ctx.font = font;
+
+    const spaceWidth = ctx.measureText(" ").width;
+    const hyphenWidth = ctx.measureText("-").width;
+    const indentWidth = 8 * spaceWidth;
+
+    // Starting glue
+    yield {
+      type: "glue",
+      width: indentWidth,
+      penalty: MAX_PENALTY,
+      stretchability: 0.0,
+      shrinkability: 0.0,
+    };
+
+    for (const { segment: sentence } of sentenceSegmenter.segment(text)) {
+      for (const { segment: word } of wordSegmenter.segment(sentence)) {
+        if (word === "\u00A0") {
+          // Turn non-break spaces into non-breaking glue.
+          const width = spaceWidth;
+          yield {
+            type: "glue",
+            width,
+            penalty: MAX_PENALTY,
+            stretchability: 0.5 * width,
+            shrinkability: 0.3 * width,
+          };
+        } else if (word.match(/^\s$/)) {
+          // Turn spaces into glue.
+          const width = spaceWidth;
+          yield {
+            type: "glue",
+            width,
+            penalty: LINE_PENALTY,
+            stretchability: 0.5 * width,
+            shrinkability: 0.3 * width,
+          };
+        } else {
+          // All other text becomes boxes.
+          const syllables = word.split("\u00AD");
+          for (let syllableIdx = 0; syllableIdx < syllables.length; syllableIdx++) {
+            const syllable = syllables[syllableIdx];
+            let width = ctx.measureText(syllable).width;
+            yield {
+              type: "box",
+              width,
+              font,
+              text: syllable,
+            };
+            if (syllableIdx !== syllables.length - 1) {
+              yield {
+                type: "penalty",
+                penalty: HYPHEN_PENALTY,
+                width: hyphenWidth,
+                flagged: true,
+                font,
+                text: "-",
+              };
+            }
+          }
+        }
+      }
+    }
+
+    // Finishing glue and forced line break.
+    yield {
+      type: "glue",
+      width: 0.0,
+      penalty: MAX_PENALTY,
+      stretchability: MAX_STRETCH,
+      shrinkability: 0.0,
+    };
+    yield { type: "penalty", width: 0.0, penalty: -MAX_PENALTY, flagged: true };
+  } finally {
+    ctx.restore();
+  }
+}
+
+interface RunningSum {
+  width: number;
+  stretch: number;
+  shrink: number;
+}
+
+interface BreakPoint {
+  item: ParagraphItem;
+  itemIndex: number;
+  runningSum: RunningSum; // up to but not including this item
+}
+
+function* potentialBreakPoints(paraItems: ArrayLike<ParagraphItem>): Generator<BreakPoint> {
+  let previousItemWasBox = false,
+    width = 0.0,
+    stretch = 0.0,
+    shrink = 0.0;
+
+  for (let itemIndex = 0; itemIndex < paraItems.length; itemIndex++) {
+    const item = paraItems[itemIndex];
+    let isPotentialBreak = false;
+    if (item.type === "glue") {
+      isPotentialBreak = previousItemWasBox && item.penalty < MAX_PENALTY;
+    } else if (item.type === "penalty") {
+      isPotentialBreak = item.penalty < MAX_PENALTY;
+    }
+
+    if (isPotentialBreak) {
+      yield { item, itemIndex, runningSum: { width, shrink, stretch } };
+    }
+
+    if (item.type !== "penalty") {
+      width += item.width;
+    }
+    if (item.type === "glue") {
+      stretch += item.stretchability;
+      shrink += item.shrinkability;
+    }
+
+    previousItemWasBox = item.type === "box";
+  }
+}
+
+export interface Line {
+  startIndex: number; // inclusive
+  endIndex: number; // exclusive
+  adjustmentRatio: number;
+  naturalWidth: number;
+}
+
+export function* greedyBreaks(
+  paraItems: ArrayLike<ParagraphItem>,
+  lineWidth: number,
+): Generator<Line> {
+  let previousLineEndItemIndex = -1,
+    previousLineRunningSum: RunningSum = { width: 0.0, stretch: 0.0, shrink: 0.0 };
+  let previousBreak: BreakPoint | null = null,
+    previousBreakNaturalWidth = 0.0,
+    previousBreakAdjustmentRatio = 0.0;
+
+  for (const breakPoint of potentialBreakPoints(paraItems)) {
+    let naturalWidth = breakPoint.runningSum.width - previousLineRunningSum.width;
+    if (breakPoint.item.type === "penalty") {
+      naturalWidth += breakPoint.item.width;
+    }
+
+    let adjustmentRatio = 0.0;
+    if (naturalWidth < lineWidth) {
+      const lineStretch = breakPoint.runningSum.stretch - previousLineRunningSum.stretch;
+      adjustmentRatio = lineStretch > 0 ? (lineWidth - naturalWidth) / lineStretch : Infinity;
+    } else if (naturalWidth > lineWidth) {
+      const lineShrink = breakPoint.runningSum.shrink - previousLineRunningSum.shrink;
+      adjustmentRatio = lineShrink > 0 ? (lineWidth - naturalWidth) / lineShrink : Infinity;
+    }
+
+    if (breakPoint.item.type === "penalty" && breakPoint.item.penalty <= -MAX_PENALTY) {
+      // This is a forced break.
+      yield {
+        startIndex: previousLineEndItemIndex + 1,
+        endIndex: breakPoint.itemIndex + 1,
+        adjustmentRatio,
+        naturalWidth,
+      };
+      previousLineEndItemIndex = breakPoint.itemIndex;
+      // No need to add width here because break point is definitely a penalty and should
+      // not be included in the running sum.
+      previousLineRunningSum = breakPoint.runningSum;
+    } else if (naturalWidth > lineWidth && previousBreak) {
+      yield {
+        startIndex: previousLineEndItemIndex + 1,
+        endIndex: previousBreak.itemIndex + 1,
+        adjustmentRatio: previousBreakAdjustmentRatio,
+        naturalWidth: previousBreakNaturalWidth,
+      };
+      previousLineEndItemIndex = previousBreak.itemIndex;
+      previousLineRunningSum = { ...previousBreak.runningSum };
+
+      // If we broke at a glue, we need to include the glue's width and shrink/stretch in the
+      // running sum so that later lines calculate their natural width, etc correctly.
+      if (previousBreak.item.type === "glue") {
+        previousLineRunningSum.width += previousBreak.item.width;
+        previousLineRunningSum.stretch += previousBreak.item.stretchability;
+        previousLineRunningSum.shrink += previousBreak.item.shrinkability;
+      }
+    }
+
+    previousBreak = breakPoint;
+    previousBreakNaturalWidth = naturalWidth;
+    previousBreakAdjustmentRatio = adjustmentRatio;
+  }
+}
+
+interface OptimiserParameters {
+  upperAdjustmentRatio?: number;
+  extraFlagPenalty?: number;
+  mismatchedFitnessPenalty?: number;
+}
+
+const DEFAULT_OPTIMISER_PARAMETERS = {
+  upperAdjustmentRatio: 6.0,
+  extraFlagPenalty: 50.0,
+  mismatchedFitnessPenalty: 10.0,
+};
+
+interface Node {
+  lineIndex: number;
+  fitnessClass: number;
+  naturalWidth: number;
+  adjustmentRatio: number;
+  breakPoint?: BreakPoint;
+  totalDemerit: number;
+  previous?: Node;
+}
+
+const keyForNode = (node: Node) =>
+  `${node.lineIndex}-${node.fitnessClass}-${node.breakPoint?.itemIndex}`;
+
+const fitnessClassForAdjustmentRatio = (adjustmentRatio: number): number => {
+  if (adjustmentRatio < -0.5) {
+    return 0; // tight
+  } else if (adjustmentRatio < 0.5) {
+    return 1; // normal
+  } else if (adjustmentRatio < 1.0) {
+    return 2; // loose
+  }
+  return 3; // very loose
+};
+
+const cube = (x: number) => x * x * x;
+const square = (x: number) => x * x;
+
+export function* optimalBreaks(
+  paraItems: ArrayLike<ParagraphItem>,
+  lineWidth: number,
+  parameters?: OptimiserParameters,
+): Generator<Line> {
+  const { upperAdjustmentRatio, mismatchedFitnessPenalty } = {
+    ...DEFAULT_OPTIMISER_PARAMETERS,
+    ...parameters,
+  };
+  const activeNodes = new Map<string, Node>();
+  const initialRunningSum = { width: 0.0, stretch: 0.0, shrink: 0.0 };
+
+  // Add an initial node representing the start of the paragraph.
+  const startNode = {
+    lineIndex: -1,
+    fitnessClass: 1,
+    totalDemerit: 0.0,
+    adjustmentRatio: 0.0,
+    naturalWidth: 0.0,
+  };
+  activeNodes.set(keyForNode(startNode), startNode);
+
+  for (const breakPoint of potentialBreakPoints(paraItems)) {
+    if (breakPoint.item.type === "box") {
+      throw new Error("Unexpected box used as break.");
+    }
+    const breakIsPenalty = breakPoint.item.type === "penalty";
+
+    // Make array copy since we may be modifying the active node list.
+    for (const node of Array.from(activeNodes.values())) {
+      // Get the node's running sum and calculate the "natural" width of a line from the node to
+      // this breakpoint.
+      const nodeRunningSum = node.breakPoint?.runningSum ?? initialRunningSum;
+      let naturalWidth = breakPoint.runningSum.width - nodeRunningSum.width;
+      if (node.breakPoint && node.breakPoint.item.type !== "penalty") {
+        // If the previous line ended on glue, we need to make sure we account for its width as it
+        // won't be in the node's running sum.
+        naturalWidth -= node.breakPoint.item.width;
+      }
+      if (breakIsPenalty) {
+        naturalWidth += breakPoint.item.width;
+      }
+
+      // Compute the adjustment ratio for the line between the node and the current breakpoint.
+      let adjustmentRatio = 0.0;
+      if (naturalWidth < lineWidth) {
+        const lineStretch = breakPoint.runningSum.stretch - nodeRunningSum.stretch;
+        adjustmentRatio = lineStretch > 0 ? (lineWidth - naturalWidth) / lineStretch : Infinity;
+      } else if (naturalWidth > lineWidth) {
+        const lineShrink = breakPoint.runningSum.shrink - nodeRunningSum.shrink;
+        adjustmentRatio = lineShrink > 0 ? (lineWidth - naturalWidth) / lineShrink : Infinity;
+      }
+
+      // Deactivate nodes where we're considering endpoints so far away that glue would have to be
+      // shrunken too far or if this breakpoint is a forced breakpoint and so later lines could
+      // never start at the node.
+      if (adjustmentRatio < -1.0 || breakPoint.item.penalty <= -MAX_PENALTY) {
+        activeNodes.delete(keyForNode(node));
+
+        // If this removes all active nodes, make sure we record the next break as feasible. This
+        // is a "break of last resort" to make sure we find _some_ solution.
+        if (activeNodes.size === 0) {
+          adjustmentRatio = -1.0;
+        }
+      }
+
+      // If this line is not stretched or shrunk too much, record it as a feasible breakpoint.
+      if (adjustmentRatio >= -1.0 && adjustmentRatio < upperAdjustmentRatio) {
+        // Compute fitness class for this line.
+        const fitnessClass = fitnessClassForAdjustmentRatio(adjustmentRatio);
+
+        let lineDemerit;
+        if (breakPoint.item.penalty <= -MAX_PENALTY) {
+          // Forced breakpoint
+          lineDemerit = square(1.0 + 100.0 * cube(Math.abs(adjustmentRatio)));
+        } else {
+          let itemPenalty = breakPoint.item.penalty;
+
+          // If the previous line break was flagged and this line break was flagged, add an
+          // additional penalty.
+          const nodeFlagged =
+            node.breakPoint &&
+            node.breakPoint.item.type === "penalty" &&
+            node.breakPoint.item.flagged;
+          const breakFlagged = breakPoint.item.type === "penalty" && breakPoint.item.flagged;
+          if (nodeFlagged && breakFlagged) {
+            itemPenalty += mismatchedFitnessPenalty;
+          }
+
+          // If we move more than 1 step of fitness class, add penalty.
+          const fitnessDelta = Math.abs(fitnessClass - node.fitnessClass);
+          if (fitnessDelta > 1) {
+            itemPenalty += mismatchedFitnessPenalty;
+          }
+
+          if (itemPenalty >= 0.0) {
+            lineDemerit = square(1.0 + 100.0 * cube(Math.abs(adjustmentRatio)) + itemPenalty);
+          } else {
+            lineDemerit =
+              square(1.0 + 100.0 * cube(Math.abs(adjustmentRatio))) - square(itemPenalty);
+          }
+        }
+
+        // Record this break if it is more optimal than an existing one or if there is no current
+        // break recorded.
+        const breakNode = {
+          lineIndex: node.lineIndex + 1,
+          breakPoint,
+          fitnessClass,
+          totalDemerit: node.totalDemerit + lineDemerit,
+          previous: node,
+          naturalWidth,
+          adjustmentRatio,
+        };
+        const breakNodeKey = keyForNode(breakNode);
+        const existingNode = activeNodes.get(breakNodeKey);
+        if (!existingNode || existingNode.totalDemerit > breakNode.totalDemerit) {
+          activeNodes.set(breakNodeKey, breakNode);
+        }
+      }
+    }
+  }
+
+  let optimalNode: Node | undefined;
+  for (const node of activeNodes.values()) {
+    if (!optimalNode || optimalNode.totalDemerit > node.totalDemerit) {
+      optimalNode = node;
+    }
+  }
+  if (!optimalNode) {
+    throw new Error("Could not find optimal path.");
+  }
+
+  const lines: Array<Line> = [];
+  let node: Node | undefined = optimalNode;
+  while (node) {
+    if (node.previous) {
+      lines.push({
+        startIndex: node.previous.breakPoint ? node.previous.breakPoint.itemIndex + 1 : 0,
+        endIndex: node.breakPoint ? node.breakPoint.itemIndex + 1 : 0,
+        adjustmentRatio: node.adjustmentRatio,
+        naturalWidth: node.naturalWidth,
+      });
+    }
+    node = node.previous;
+  }
+
+  for (let lineIdx = lines.length - 1; lineIdx >= 0; lineIdx--) {
+    yield lines[lineIdx];
+  }
+}
+
+// Use polyfilled segmenter if necessary.
+const getSegmenterClass = async () =>
+  Intl.Segmenter ?? ((await createIntlSegmenterPolyfill()) as any as typeof Intl.Segmenter);
+const wordSegmenterPromise = (async () =>
+  new (await getSegmenterClass())("en", { granularity: "word" }))();
+const sentenceSegmenterPromise = (async () =>
+  new (await getSegmenterClass())("en", { granularity: "sentence" }))();
+
+export const render = async (
+  canvasEl: HTMLCanvasElement,
+  useOptimal: boolean,
+  paraWidth: number,
+) => {
+  // Use polyfilled segmenter if necessary.
+  const wordSegmenter = await wordSegmenterPromise;
+  const sentenceSegmenter = await sentenceSegmenterPromise;
+
+  await Promise.all(Array.from(document.fonts).map((f) => f.status === "loaded" || f.load()));
+
+  const { width, height } = canvasEl;
+
+  const ctx = canvasEl.getContext("2d");
+  if (!ctx) {
+    console.error("Could not create 2d context.");
+    return;
+  }
+
+  const fontSize = 20;
+  const lineHeight = 1.2 * fontSize;
+  const font = `${fontSize}px Roman`;
+
+  ctx.fillStyle = "#eee";
+  ctx.strokeStyle = "rgba(255, 0, 0, 0.5)";
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.beginPath();
+  ctx.moveTo(fontSize, 0);
+  ctx.lineTo(fontSize, height);
+  ctx.moveTo(fontSize + paraWidth, 0);
+  ctx.lineTo(fontSize + paraWidth, height);
+  ctx.stroke();
+
+  ctx.fillStyle = "#000";
+  let y = lineHeight;
+  for (const text of paragraphs) {
+    const paraItems = Array.from(
+      textToParagraphItems(text, ctx, font, sentenceSegmenter, wordSegmenter),
+    );
+    const lines = Array.from(
+      useOptimal ? optimalBreaks(paraItems, paraWidth) : greedyBreaks(paraItems, paraWidth),
+    );
+
+    for (const line of lines) {
+      let x = fontSize;
+      for (let itemIndex = line.startIndex; itemIndex < line.endIndex; itemIndex++) {
+        const item = paraItems[itemIndex];
+        if (item.type === "box" || (itemIndex === line.endIndex - 1 && item.type === "penalty")) {
+          if (item.font && item.text && item.text !== "") {
+            ctx.font = item.font;
+            ctx.fillText(item.text, x, y);
+          }
+          x += item.width;
+        } else if (item.type === "glue" && itemIndex !== line.endIndex - 1) {
+          x += item.width;
+          if (line.adjustmentRatio < 0) {
+            x += line.adjustmentRatio * item.shrinkability;
+          } else if (line.adjustmentRatio > 0) {
+            x += line.adjustmentRatio * item.stretchability;
+          }
+        }
+      }
+
+      ctx.font = `${fontSize}px sans-serif`;
+      ctx.fillText(`${line.adjustmentRatio.toFixed(2)}`, 2 * fontSize + paraWidth, y);
+
+      y += lineHeight;
+    }
+  }
+};

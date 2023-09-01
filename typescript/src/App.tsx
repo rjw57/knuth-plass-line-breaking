@@ -1,24 +1,51 @@
-import React from 'react';
-import logo from './logo.svg';
-import './App.css';
+import { useEffect, useState, useId } from "react";
+import "./App.css";
+
+import { render } from "./linebreaking";
 
 function App() {
+  const optimalId = useId(),
+    widthId = useId();
+  const [canvasEl, setCanvasEl] = useState<HTMLCanvasElement | null>(null);
+  const [paraWidth, setParaWidth] = useState<number>(500);
+  const [useOptimal, setUseOptimal] = useState<boolean>(true);
+
+  useEffect(() => {
+    if (!canvasEl) {
+      return;
+    }
+    render(canvasEl, useOptimal, paraWidth);
+  }, [canvasEl, useOptimal, paraWidth]);
+
   return (
     <div className="App">
-      <header className="App-header">
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.tsx</code> and save to reload.
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
-      </header>
+      <div>
+        <input
+          id={optimalId}
+          type="checkbox"
+          checked={useOptimal}
+          onChange={({ target: { checked } }) => {
+            setUseOptimal(checked);
+          }}
+        />
+        <label htmlFor={optimalId}>Use optimal algorithm</label>
+      </div>
+      <div>
+        <input
+          type="range"
+          id={widthId}
+          min="10"
+          max="700"
+          value={paraWidth}
+          onChange={({ target: { value } }) => {
+            setParaWidth(parseFloat(value));
+          }}
+        />
+        <label htmlFor={widthId}>Paragraph width</label>
+      </div>
+      <div>
+        <canvas width="800" height="800" ref={setCanvasEl} />
+      </div>
     </div>
   );
 }
