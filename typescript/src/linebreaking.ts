@@ -239,20 +239,7 @@ export function* greedyBreaks(
       adjustmentRatio = lineShrink > 0 ? (lineWidth - naturalWidth) / lineShrink : Infinity;
     }
 
-    if (breakPoint.item.type === "penalty" && breakPoint.item.penalty <= -MAX_PENALTY) {
-      // This is a forced break.
-      yield {
-        startIndex: previousLineEndItemIndex + 1,
-        endIndex: breakPoint.itemIndex + 1,
-        adjustmentRatio,
-        naturalWidth,
-        isOverfull: adjustmentRatio < -1.0,
-      };
-      previousLineEndItemIndex = breakPoint.itemIndex;
-      // No need to add width here because break point is definitely a penalty and should
-      // not be included in the running sum.
-      previousLineRunningSum = breakPoint.runningSum;
-    } else if (naturalWidth > lineWidth && previousBreak) {
+    if (naturalWidth > lineWidth && previousBreak) {
       yield {
         startIndex: previousLineEndItemIndex + 1,
         endIndex: previousBreak.itemIndex + 1,
@@ -270,6 +257,21 @@ export function* greedyBreaks(
         previousLineRunningSum.stretch += previousBreak.item.stretchability;
         previousLineRunningSum.shrink += previousBreak.item.shrinkability;
       }
+    }
+
+    if (breakPoint.item.type === "penalty" && breakPoint.item.penalty <= -MAX_PENALTY) {
+      // This is a forced break.
+      yield {
+        startIndex: previousLineEndItemIndex + 1,
+        endIndex: breakPoint.itemIndex + 1,
+        adjustmentRatio: 0.0,
+        naturalWidth: 0.0, // TODO: actually calculate this
+        isOverfull: false,
+      };
+      previousLineEndItemIndex = breakPoint.itemIndex;
+      // No need to add width here because break point is definitely a penalty and should
+      // not be included in the running sum.
+      previousLineRunningSum = breakPoint.runningSum;
     }
 
     previousBreak = breakPoint;
