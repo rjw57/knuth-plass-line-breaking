@@ -79,7 +79,8 @@ function* textToParagraphItems(
     ctx.font = font;
 
     const spaceWidth = ctx.measureText(" ").width;
-    const hyphenWidth = ctx.measureText("-").width;
+    const overhangingPunctuationWidth = 0.5 * spaceWidth;
+    const hyphenWidth = ctx.measureText("-").width - overhangingPunctuationWidth;
     const indentWidth = 8 * spaceWidth;
 
     // Starting glue
@@ -92,24 +93,21 @@ function* textToParagraphItems(
     };
 
     for (const { segment: sentence } of sentenceSegmenter.segment(text)) {
-      for (const { segment: word } of wordSegmenter.segment(sentence)) {
-        if (word === "\u00A0") {
-          // Turn non-break spaces into non-breaking glue.
-          const width = spaceWidth;
-          yield {
-            type: "glue",
-            width,
-            penalty: MAX_PENALTY,
-            stretchability: 0.5 * width,
-            shrinkability: 0.3 * width,
-          };
-        } else if (word.match(/^\s$/)) {
+      let prevWasPunctuation = false;
+      for (const { segment: word, index: wordIndex } of wordSegmenter.segment(sentence)) {
+        const isPunctuation = !!word.match(/^\p{P}$/u);
+        const isFinalWord = wordIndex + word.length >= sentence.length;
+
+        let extraWidth = prevWasPunctuation ? overhangingPunctuationWidth : 0.0;
+
+        if (word.match(/^\s$/)) {
           // Turn spaces into glue.
           const width = spaceWidth;
+          const penalty = word === "\u00A0" ? MAX_PENALTY : LINE_PENALTY;
           yield {
             type: "glue",
-            width,
-            penalty: LINE_PENALTY,
+            width: width + extraWidth + (isFinalWord ? spaceWidth : 0.0),
+            penalty: penalty,
             stretchability: 0.5 * width,
             shrinkability: 0.3 * width,
           };
@@ -119,6 +117,12 @@ function* textToParagraphItems(
           for (let syllableIdx = 0; syllableIdx < syllables.length; syllableIdx++) {
             const syllable = syllables[syllableIdx];
             let width = ctx.measureText(syllable).width;
+            if (syllableIdx === 0) {
+              width += extraWidth;
+            }
+            if (syllableIdx === syllables.length - 1 && isPunctuation) {
+              width -= overhangingPunctuationWidth;
+            }
             yield {
               type: "box",
               width,
@@ -137,6 +141,7 @@ function* textToParagraphItems(
             }
           }
         }
+        prevWasPunctuation = isPunctuation;
       }
     }
 
@@ -182,7 +187,11 @@ function* potentialBreakPoints(paraItems: ArrayLike<ParagraphItem>): Generator<B
     }
 
     if (isPotentialBreak) {
-      yield { item, itemIndex, runningSum: { width, shrink, stretch } };
+      yield {
+        item,
+        itemIndex,
+        runningSum: { width, shrink, stretch },
+      };
     }
 
     if (item.type !== "penalty") {
@@ -202,6 +211,7 @@ export interface Line {
   endIndex: number; // exclusive
   adjustmentRatio: number;
   naturalWidth: number;
+  isOverfull: boolean;
 }
 
 export function* greedyBreaks(
@@ -236,6 +246,7 @@ export function* greedyBreaks(
         endIndex: breakPoint.itemIndex + 1,
         adjustmentRatio,
         naturalWidth,
+        isOverfull: adjustmentRatio < -1.0,
       };
       previousLineEndItemIndex = breakPoint.itemIndex;
       // No need to add width here because break point is definitely a penalty and should
@@ -247,6 +258,7 @@ export function* greedyBreaks(
         endIndex: previousBreak.itemIndex + 1,
         adjustmentRatio: previousBreakAdjustmentRatio,
         naturalWidth: previousBreakNaturalWidth,
+        isOverfull: previousBreakAdjustmentRatio < -1.0,
       };
       previousLineEndItemIndex = previousBreak.itemIndex;
       previousLineRunningSum = { ...previousBreak.runningSum };
@@ -273,7 +285,7 @@ interface OptimiserParameters {
 }
 
 const DEFAULT_OPTIMISER_PARAMETERS = {
-  upperAdjustmentRatio: 6.0,
+  upperAdjustmentRatio: 4.0,
   extraFlagPenalty: 50.0,
   mismatchedFitnessPenalty: 10.0,
 };
@@ -283,6 +295,7 @@ interface Node {
   fitnessClass: number;
   naturalWidth: number;
   adjustmentRatio: number;
+  isOverfull: boolean;
   breakPoint?: BreakPoint;
   totalDemerit: number;
   previous?: Node;
@@ -310,7 +323,7 @@ export function* optimalBreaks(
   lineWidth: number,
   parameters?: OptimiserParameters,
 ): Generator<Line> {
-  const { upperAdjustmentRatio, mismatchedFitnessPenalty } = {
+  const { upperAdjustmentRatio, mismatchedFitnessPenalty, extraFlagPenalty } = {
     ...DEFAULT_OPTIMISER_PARAMETERS,
     ...parameters,
   };
@@ -324,6 +337,7 @@ export function* optimalBreaks(
     totalDemerit: 0.0,
     adjustmentRatio: 0.0,
     naturalWidth: 0.0,
+    isOverfull: false,
   };
   activeNodes.set(keyForNode(startNode), startNode);
 
@@ -337,13 +351,17 @@ export function* optimalBreaks(
     for (const node of Array.from(activeNodes.values())) {
       // Get the node's running sum and calculate the "natural" width of a line from the node to
       // this breakpoint.
-      const nodeRunningSum = node.breakPoint?.runningSum ?? initialRunningSum;
-      let naturalWidth = breakPoint.runningSum.width - nodeRunningSum.width;
-      if (node.breakPoint && node.breakPoint.item.type !== "penalty") {
-        // If the previous line ended on glue, we need to make sure we account for its width as it
-        // won't be in the node's running sum.
-        naturalWidth -= node.breakPoint.item.width;
+      const nodeRunningSum = { ...(node.breakPoint?.runningSum ?? initialRunningSum) };
+
+      // If the previous line ended on glue, we need to make sure we account for its width as it
+      // won't be in the node's running sum.
+      if (node.breakPoint && node.breakPoint.item.type === "glue") {
+        nodeRunningSum.width += node.breakPoint.item.width;
+        nodeRunningSum.stretch += node.breakPoint.item.stretchability;
+        nodeRunningSum.shrink += node.breakPoint.item.shrinkability;
       }
+
+      let naturalWidth = breakPoint.runningSum.width - nodeRunningSum.width;
       if (breakIsPenalty) {
         naturalWidth += breakPoint.item.width;
       }
@@ -351,12 +369,14 @@ export function* optimalBreaks(
       // Compute the adjustment ratio for the line between the node and the current breakpoint.
       let adjustmentRatio = 0.0;
       if (naturalWidth < lineWidth) {
-        const lineStretch = breakPoint.runningSum.stretch - nodeRunningSum.stretch;
+        let lineStretch = breakPoint.runningSum.stretch - nodeRunningSum.stretch;
         adjustmentRatio = lineStretch > 0 ? (lineWidth - naturalWidth) / lineStretch : Infinity;
       } else if (naturalWidth > lineWidth) {
         const lineShrink = breakPoint.runningSum.shrink - nodeRunningSum.shrink;
         adjustmentRatio = lineShrink > 0 ? (lineWidth - naturalWidth) / lineShrink : Infinity;
       }
+
+      let isOverfull = false;
 
       // Deactivate nodes where we're considering endpoints so far away that glue would have to be
       // shrunken too far or if this breakpoint is a forced breakpoint and so later lines could
@@ -368,6 +388,7 @@ export function* optimalBreaks(
         // is a "break of last resort" to make sure we find _some_ solution.
         if (activeNodes.size === 0) {
           adjustmentRatio = -1.0;
+          isOverfull = true;
         }
       }
 
@@ -391,7 +412,7 @@ export function* optimalBreaks(
             node.breakPoint.item.flagged;
           const breakFlagged = breakPoint.item.type === "penalty" && breakPoint.item.flagged;
           if (nodeFlagged && breakFlagged) {
-            itemPenalty += mismatchedFitnessPenalty;
+            itemPenalty += extraFlagPenalty;
           }
 
           // If we move more than 1 step of fitness class, add penalty.
@@ -418,6 +439,7 @@ export function* optimalBreaks(
           previous: node,
           naturalWidth,
           adjustmentRatio,
+          isOverfull,
         };
         const breakNodeKey = keyForNode(breakNode);
         const existingNode = activeNodes.get(breakNodeKey);
@@ -447,6 +469,7 @@ export function* optimalBreaks(
         endIndex: node.breakPoint ? node.breakPoint.itemIndex + 1 : 0,
         adjustmentRatio: node.adjustmentRatio,
         naturalWidth: node.naturalWidth,
+        isOverfull: node.isOverfull,
       });
     }
     node = node.previous;
@@ -473,6 +496,7 @@ export const render = async (
   // Use polyfilled segmenter if necessary.
   const wordSegmenter = await wordSegmenterPromise;
   const sentenceSegmenter = await sentenceSegmenterPromise;
+  const startingUpperAR = 2.0, endingUpperAR = 30.0;
 
   await Promise.all(Array.from(document.fonts).map((f) => f.status === "loaded" || f.load()));
 
@@ -489,7 +513,7 @@ export const render = async (
   const font = `${fontSize}px Roman`;
 
   ctx.fillStyle = "#eee";
-  ctx.strokeStyle = "rgba(255, 0, 0, 0.5)";
+  ctx.strokeStyle = "rgba(255, 0, 0, 0.25)";
   ctx.fillRect(0, 0, width, height);
 
   ctx.beginPath();
@@ -499,17 +523,31 @@ export const render = async (
   ctx.lineTo(fontSize + paraWidth, height);
   ctx.stroke();
 
-  ctx.fillStyle = "#000";
   let y = lineHeight;
   for (const text of paragraphs) {
     const paraItems = Array.from(
       textToParagraphItems(text, ctx, font, sentenceSegmenter, wordSegmenter),
     );
-    const lines = Array.from(
-      useOptimal ? optimalBreaks(paraItems, paraWidth) : greedyBreaks(paraItems, paraWidth),
-    );
+
+    let lines: Array<Line>,
+      tryAgain = false;
+    const params = { upperAdjustmentRatio: startingUpperAR };
+    do {
+      tryAgain = false;
+      lines = Array.from(
+        useOptimal
+          ? optimalBreaks(paraItems, paraWidth, params)
+          : greedyBreaks(paraItems, paraWidth),
+      );
+      const hasOverfull = lines.some((l) => l.isOverfull);
+      if (hasOverfull) {
+        params.upperAdjustmentRatio *= 1.5;
+        tryAgain = params.upperAdjustmentRatio <= endingUpperAR;
+      }
+    } while (tryAgain);
 
     for (const line of lines) {
+      ctx.fillStyle = line.isOverfull ? "#800" : "#000";
       let x = fontSize;
       for (let itemIndex = line.startIndex; itemIndex < line.endIndex; itemIndex++) {
         const item = paraItems[itemIndex];
@@ -529,7 +567,8 @@ export const render = async (
         }
       }
 
-      ctx.font = `${fontSize}px sans-serif`;
+      ctx.font = `${fontSize * 0.8}px sans-serif`;
+      ctx.fillStyle = "#888";
       ctx.fillText(`${line.adjustmentRatio.toFixed(2)}`, 2 * fontSize + paraWidth, y);
 
       y += lineHeight;

@@ -7,7 +7,7 @@ function App() {
   const optimalId = useId(),
     widthId = useId();
   const [canvasEl, setCanvasEl] = useState<HTMLCanvasElement | null>(null);
-  const [paraWidth, setParaWidth] = useState<number>(500);
+  const [paraWidth, setParaWidth] = useState<number>(700);
   const [useOptimal, setUseOptimal] = useState<boolean>(true);
 
   useEffect(() => {
