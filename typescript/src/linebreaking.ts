@@ -301,10 +301,8 @@ interface Node {
   breakPoint?: BreakPoint;
   totalDemerit: number;
   previous?: Node;
+  link?: Node;
 }
-
-const keyForNode = (node: Node) =>
-  `${node.lineIndex}-${node.fitnessClass}-${node.breakPoint?.itemIndex}`;
 
 const fitnessClassForAdjustmentRatio = (adjustmentRatio: number): number => {
   if (adjustmentRatio < -0.5) {
@@ -329,11 +327,10 @@ export function* optimalBreaks(
     ...DEFAULT_OPTIMISER_PARAMETERS,
     ...parameters,
   };
-  const activeNodes = new Map<string, Node>();
   const initialRunningSum = { width: 0.0, stretch: 0.0, shrink: 0.0 };
 
   // Add an initial node representing the start of the paragraph.
-  const startNode = {
+  let firstActiveNode: Node | undefined = {
     lineIndex: -1,
     fitnessClass: 1,
     totalDemerit: 0.0,
@@ -341,16 +338,23 @@ export function* optimalBreaks(
     naturalWidth: 0.0,
     isOverfull: false,
   };
-  activeNodes.set(keyForNode(startNode), startNode);
+  const deactivatedNodes: Node[] = [];
 
   for (const breakPoint of potentialBreakPoints(paraItems)) {
     if (breakPoint.item.type === "box") {
       throw new Error("Unexpected box used as break.");
     }
     const breakIsPenalty = breakPoint.item.type === "penalty";
+    const isForcedBreak = breakIsPenalty && breakPoint.item.penalty <= -MAX_PENALTY;
+
+    // Best nodes for each fitness class and line index.
+    const minimalDemerits = new Map<string, Node>();
 
     // Make array copy since we may be modifying the active node list.
-    for (const node of Array.from(activeNodes.values())) {
+    let prevNode: Node | undefined;
+    for (let node: Node | undefined = firstActiveNode; node; node = node.link) {
+      const nextNode: Node | undefined = node?.link;
+
       // Get the node's running sum and calculate the "natural" width of a line from the node to
       // this breakpoint.
       const nodeRunningSum = { ...(node.breakPoint?.runningSum ?? initialRunningSum) };
@@ -375,27 +379,33 @@ export function* optimalBreaks(
         adjustmentRatio = lineStretch > 0 ? (lineWidth - naturalWidth) / lineStretch : Infinity;
       } else if (naturalWidth > lineWidth) {
         const lineShrink = breakPoint.runningSum.shrink - nodeRunningSum.shrink;
-        adjustmentRatio = lineShrink > 0 ? (lineWidth - naturalWidth) / lineShrink : Infinity;
+        adjustmentRatio = lineShrink > 0 ? (lineWidth - naturalWidth) / lineShrink : -Infinity;
       }
 
-      let isOverfull = false;
+      const isOverfull = adjustmentRatio < -1.0;
 
       // Deactivate nodes where we're considering endpoints so far away that glue would have to be
       // shrunken too far or if this breakpoint is a forced breakpoint and so later lines could
       // never start at the node.
-      if (adjustmentRatio < -1.0 || breakPoint.item.penalty <= -MAX_PENALTY) {
-        activeNodes.delete(keyForNode(node));
+      if (adjustmentRatio < -1.0 || isForcedBreak) {
+        deactivatedNodes.push(node);
+        if (prevNode) {
+          prevNode.link = nextNode;
+        } else {
+          firstActiveNode = nextNode;
+        }
 
         // If this removes all active nodes, make sure we record the next break as feasible. This
         // is a "break of last resort" to make sure we find _some_ solution.
-        if (activeNodes.size === 0) {
+        if (!firstActiveNode) {
           adjustmentRatio = -1.0;
-          isOverfull = true;
         }
+      } else {
+        prevNode = node;
       }
 
       // If this line is not stretched or shrunk too much, record it as a feasible breakpoint.
-      if (adjustmentRatio >= -1.0 && adjustmentRatio < upperAdjustmentRatio) {
+      if (adjustmentRatio >= -1.0 && adjustmentRatio <= upperAdjustmentRatio) {
         // Compute fitness class for this line.
         const fitnessClass = fitnessClassForAdjustmentRatio(adjustmentRatio);
 
@@ -433,27 +443,33 @@ export function* optimalBreaks(
 
         // Record this break if it is more optimal than an existing one or if there is no current
         // break recorded.
-        const breakNode = {
-          lineIndex: node.lineIndex + 1,
-          breakPoint,
-          fitnessClass,
-          totalDemerit: node.totalDemerit + lineDemerit,
-          previous: node,
-          naturalWidth,
-          adjustmentRatio,
-          isOverfull,
-        };
-        const breakNodeKey = keyForNode(breakNode);
-        const existingNode = activeNodes.get(breakNodeKey);
-        if (!existingNode || existingNode.totalDemerit > breakNode.totalDemerit) {
-          activeNodes.set(breakNodeKey, breakNode);
+        const totalDemerit = node.totalDemerit + lineDemerit;
+        const key = `${node.lineIndex+1}-${fitnessClass}`;
+        const previousBestNode = minimalDemerits.get(key);
+        if (!previousBestNode || previousBestNode.totalDemerit > totalDemerit) {
+          minimalDemerits.set(key, {
+            lineIndex: node.lineIndex + 1,
+            breakPoint,
+            fitnessClass,
+            totalDemerit: node.totalDemerit + lineDemerit,
+            previous: node,
+            naturalWidth,
+            adjustmentRatio,
+            isOverfull,
+          });
         }
+      }
+    }
+
+    for (const node of minimalDemerits.values()) {
+      if (node) {
+        firstActiveNode = { ...node, link: firstActiveNode };
       }
     }
   }
 
   let optimalNode: Node | undefined;
-  for (const node of activeNodes.values()) {
+  for (let node = firstActiveNode; node; node = node.link) {
     if (!optimalNode || optimalNode.totalDemerit > node.totalDemerit) {
       optimalNode = node;
     }
@@ -498,7 +514,8 @@ export const render = async (
   // Use polyfilled segmenter if necessary.
   const wordSegmenter = await wordSegmenterPromise;
   const sentenceSegmenter = await sentenceSegmenterPromise;
-  const startingUpperAR = 2.0, endingUpperAR = 30.0;
+  const startingUpperAR = 2.0,
+    endingUpperAR = 30.0;
 
   await Promise.all(Array.from(document.fonts).map((f) => f.status === "loaded" || f.load()));
 
@@ -543,7 +560,7 @@ export const render = async (
       );
       const hasOverfull = lines.some((l) => l.isOverfull);
       if (hasOverfull) {
-        params.upperAdjustmentRatio *= 1.5;
+        params.upperAdjustmentRatio *= 2.0;
         tryAgain = params.upperAdjustmentRatio <= endingUpperAR;
       }
     } while (tryAgain);
