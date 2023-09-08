@@ -212,6 +212,7 @@ export interface Line {
   adjustmentRatio: number;
   naturalWidth: number;
   isOverfull: boolean;
+  isUnderfull: boolean;
 }
 
 export function* greedyBreaks(
@@ -246,6 +247,7 @@ export function* greedyBreaks(
         adjustmentRatio: previousBreakAdjustmentRatio,
         naturalWidth: previousBreakNaturalWidth,
         isOverfull: previousBreakAdjustmentRatio < -1.0,
+        isUnderfull: false,
       };
       previousLineEndItemIndex = previousBreak.itemIndex;
       previousLineRunningSum = { ...previousBreak.runningSum };
@@ -267,6 +269,7 @@ export function* greedyBreaks(
         adjustmentRatio: 0.0,
         naturalWidth: 0.0, // TODO: actually calculate this
         isOverfull: false,
+        isUnderfull: false,
       };
       previousLineEndItemIndex = breakPoint.itemIndex;
       // No need to add width here because break point is definitely a penalty and should
@@ -284,12 +287,18 @@ interface OptimiserParameters {
   upperAdjustmentRatio?: number;
   extraFlagPenalty?: number;
   mismatchedFitnessPenalty?: number;
+  emergencyStretch?: number;
+  allowOverfull?: boolean;
+  looseness?: number;
 }
 
 const DEFAULT_OPTIMISER_PARAMETERS = {
   upperAdjustmentRatio: 4.0,
   extraFlagPenalty: 50.0,
   mismatchedFitnessPenalty: 10.0,
+  emergencyStretch: 0.0,
+  allowOverfull: false,
+  looseness: 0.0,
 };
 
 interface Node {
@@ -298,6 +307,7 @@ interface Node {
   naturalWidth: number;
   adjustmentRatio: number;
   isOverfull: boolean;
+  isUnderfull: boolean;
   breakPoint?: BreakPoint;
   totalDemerit: number;
   previous?: Node;
@@ -323,7 +333,14 @@ export function* optimalBreaks(
   lineWidth: number,
   parameters?: OptimiserParameters,
 ): Generator<Line> {
-  const { upperAdjustmentRatio, mismatchedFitnessPenalty, extraFlagPenalty } = {
+  const {
+    upperAdjustmentRatio,
+    mismatchedFitnessPenalty,
+    extraFlagPenalty,
+    emergencyStretch,
+    allowOverfull,
+    looseness,
+  } = {
     ...DEFAULT_OPTIMISER_PARAMETERS,
     ...parameters,
   };
@@ -337,6 +354,7 @@ export function* optimalBreaks(
     adjustmentRatio: 0.0,
     naturalWidth: 0.0,
     isOverfull: false,
+    isUnderfull: false,
   };
   const deactivatedNodes: Node[] = [];
 
@@ -373,13 +391,18 @@ export function* optimalBreaks(
       }
 
       // Compute the adjustment ratio for the line between the node and the current breakpoint.
-      let adjustmentRatio = 0.0;
+      let adjustmentRatio = 0.0,
+        actualAdjustmentRatio = 0.0;
       if (naturalWidth < lineWidth) {
         let lineStretch = breakPoint.runningSum.stretch - nodeRunningSum.stretch;
+        actualAdjustmentRatio =
+          lineStretch > 0 ? (lineWidth - naturalWidth) / lineStretch : Infinity;
+        lineStretch += emergencyStretch;
         adjustmentRatio = lineStretch > 0 ? (lineWidth - naturalWidth) / lineStretch : Infinity;
       } else if (naturalWidth > lineWidth) {
         const lineShrink = breakPoint.runningSum.shrink - nodeRunningSum.shrink;
-        adjustmentRatio = lineShrink > 0 ? (lineWidth - naturalWidth) / lineShrink : -Infinity;
+        adjustmentRatio = actualAdjustmentRatio =
+          lineShrink > 0 ? (lineWidth - naturalWidth) / lineShrink : -Infinity;
       }
 
       const isOverfull = adjustmentRatio < -1.0;
@@ -397,7 +420,7 @@ export function* optimalBreaks(
 
         // If this removes all active nodes, make sure we record the next break as feasible. This
         // is a "break of last resort" to make sure we find _some_ solution.
-        if (!firstActiveNode) {
+        if (!firstActiveNode && allowOverfull) {
           adjustmentRatio = -1.0;
         }
       } else {
@@ -444,7 +467,7 @@ export function* optimalBreaks(
         // Record this break if it is more optimal than an existing one or if there is no current
         // break recorded.
         const totalDemerit = node.totalDemerit + lineDemerit;
-        const key = `${node.lineIndex+1}-${fitnessClass}`;
+        const key = `${node.lineIndex + 1}-${fitnessClass}`;
         const previousBestNode = minimalDemerits.get(key);
         if (!previousBestNode || previousBestNode.totalDemerit > totalDemerit) {
           minimalDemerits.set(key, {
@@ -456,6 +479,7 @@ export function* optimalBreaks(
             naturalWidth,
             adjustmentRatio,
             isOverfull,
+            isUnderfull: actualAdjustmentRatio !== adjustmentRatio,
           });
         }
       }
@@ -478,6 +502,25 @@ export function* optimalBreaks(
     throw new Error("Could not find optimal path.");
   }
 
+  // If looseness is non-zero, we may want to choose a different node.
+  if (looseness !== 0) {
+    for (
+      let node = firstActiveNode, bestDelta = 0, bestDemerit = optimalNode.totalDemerit;
+      node;
+      node = node.link
+    ) {
+      const delta = node.lineIndex - optimalNode.lineIndex;
+      if ((looseness <= delta && delta < bestDelta) || (bestDelta < delta && delta <= looseness)) {
+        bestDelta = delta;
+        bestDemerit = node.totalDemerit;
+        optimalNode = node;
+      } else if (bestDelta === delta && node.totalDemerit < bestDemerit) {
+        bestDemerit = node.totalDemerit;
+        optimalNode = node;
+      }
+    }
+  }
+
   const lines: Array<Line> = [];
   let node: Node | undefined = optimalNode;
   while (node) {
@@ -488,6 +531,7 @@ export function* optimalBreaks(
         adjustmentRatio: node.adjustmentRatio,
         naturalWidth: node.naturalWidth,
         isOverfull: node.isOverfull,
+        isUnderfull: node.isUnderfull,
       });
     }
     node = node.previous;
@@ -514,8 +558,6 @@ export const render = async (
   // Use polyfilled segmenter if necessary.
   const wordSegmenter = await wordSegmenterPromise;
   const sentenceSegmenter = await sentenceSegmenterPromise;
-  const startingUpperAR = 2.0,
-    endingUpperAR = 30.0;
 
   await Promise.all(Array.from(document.fonts).map((f) => f.status === "loaded" || f.load()));
 
@@ -548,25 +590,32 @@ export const render = async (
       textToParagraphItems(text, ctx, font, sentenceSegmenter, wordSegmenter),
     );
 
-    let lines: Array<Line>,
-      tryAgain = false;
-    const params = { upperAdjustmentRatio: startingUpperAR };
-    do {
-      tryAgain = false;
-      lines = Array.from(
-        useOptimal
-          ? optimalBreaks(paraItems, paraWidth, params)
-          : greedyBreaks(paraItems, paraWidth),
-      );
+    let lines: Line[];
+    if (useOptimal) {
+      const params: OptimiserParameters = { upperAdjustmentRatio: 4.0 };
+      try {
+        // optimistic: no overfull boxes
+        lines = Array.from(optimalBreaks(paraItems, paraWidth, params));
+      } catch {
+        // Oh, dear. There was no solution, allow overfull boxes.
+        params.allowOverfull = true;
+        params.looseness = -2;
+        params.upperAdjustmentRatio = 10.0;
+        lines = Array.from(optimalBreaks(paraItems, paraWidth, params));
+      }
+
+      // Did we end up with some overfull boxes despite our best effort?
       const hasOverfull = lines.some((l) => l.isOverfull);
       if (hasOverfull) {
-        params.upperAdjustmentRatio *= 2.0;
-        tryAgain = params.upperAdjustmentRatio <= endingUpperAR;
+        params.emergencyStretch = 0.05 * paraWidth;
+        lines = Array.from(optimalBreaks(paraItems, paraWidth, params));
       }
-    } while (tryAgain);
+    } else {
+      lines = Array.from(greedyBreaks(paraItems, paraWidth));
+    }
 
     for (const line of lines) {
-      ctx.fillStyle = line.isOverfull ? "#800" : "#000";
+      ctx.fillStyle = line.isOverfull ? "#800" : (line.isUnderfull ? "#008" : "#000");
       let x = fontSize;
       for (let itemIndex = line.startIndex; itemIndex < line.endIndex; itemIndex++) {
         const item = paraItems[itemIndex];
