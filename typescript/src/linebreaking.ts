@@ -44,7 +44,6 @@ const LINE_PENALTY = 10.0;
 interface Box {
   type: "box";
   width: number;
-  font: string;
   text: string;
 }
 
@@ -61,102 +60,105 @@ interface Penalty {
   width: number;
   penalty: number;
   flagged: boolean;
-  font?: string;
   text?: string;
 }
 
 export type ParagraphItem = Box | Glue | Penalty;
 
+export type MeasureTextFunc = (text: string) => number;
+
+const makeCanvasMeasureText = (ctx: CanvasRenderingContext2D, font: string): MeasureTextFunc => (
+  (text: string) => {
+    ctx.save();
+    try {
+      ctx.font = font;
+      return ctx.measureText(text).width;
+    } finally {
+      ctx.restore();
+    }
+  }
+);
+
 function* textToParagraphItems(
   text: string,
-  ctx: CanvasRenderingContext2D,
-  font: string,
+  measureText: MeasureTextFunc,
   sentenceSegmenter: Intl.Segmenter,
   wordSegmenter: Intl.Segmenter,
 ): Generator<ParagraphItem> {
-  ctx.save();
-  try {
-    ctx.font = font;
+  const spaceWidth = measureText(" ")
+  const overhangingPunctuationWidth = 0.5 * spaceWidth;
+  const hyphenWidth = measureText("-") - overhangingPunctuationWidth;
+  const indentWidth = 8 * spaceWidth;
 
-    const spaceWidth = ctx.measureText(" ").width;
-    const overhangingPunctuationWidth = 0.5 * spaceWidth;
-    const hyphenWidth = ctx.measureText("-").width - overhangingPunctuationWidth;
-    const indentWidth = 8 * spaceWidth;
+  // Starting glue
+  yield {
+    type: "glue",
+    width: indentWidth,
+    penalty: MAX_PENALTY,
+    stretchability: 0.0,
+    shrinkability: 0.0,
+  };
 
-    // Starting glue
-    yield {
-      type: "glue",
-      width: indentWidth,
-      penalty: MAX_PENALTY,
-      stretchability: 0.0,
-      shrinkability: 0.0,
-    };
+  for (const { segment: sentence } of sentenceSegmenter.segment(text)) {
+    let prevWasPunctuation = false;
+    for (const { segment: word, index: wordIndex } of wordSegmenter.segment(sentence)) {
+      const isPunctuation = !!word.match(/^\p{P}$/u);
+      const isFinalWord = wordIndex + word.length >= sentence.length;
 
-    for (const { segment: sentence } of sentenceSegmenter.segment(text)) {
-      let prevWasPunctuation = false;
-      for (const { segment: word, index: wordIndex } of wordSegmenter.segment(sentence)) {
-        const isPunctuation = !!word.match(/^\p{P}$/u);
-        const isFinalWord = wordIndex + word.length >= sentence.length;
+      let extraWidth = prevWasPunctuation ? overhangingPunctuationWidth : 0.0;
 
-        let extraWidth = prevWasPunctuation ? overhangingPunctuationWidth : 0.0;
-
-        if (word.match(/^\s$/)) {
-          // Turn spaces into glue.
-          const width = spaceWidth;
-          const penalty = word === "\u00A0" ? MAX_PENALTY : LINE_PENALTY;
+      if (word.match(/^\s$/)) {
+        // Turn spaces into glue.
+        const width = spaceWidth;
+        const penalty = word === "\u00A0" ? MAX_PENALTY : LINE_PENALTY;
+        yield {
+          type: "glue",
+          width: width + extraWidth + (isFinalWord ? spaceWidth : 0.0),
+          penalty: penalty,
+          stretchability: 0.5 * width,
+          shrinkability: 0.3 * width,
+        };
+      } else {
+        // All other text becomes boxes.
+        const syllables = word.split("\u00AD");
+        for (let syllableIdx = 0; syllableIdx < syllables.length; syllableIdx++) {
+          const syllable = syllables[syllableIdx];
+          let width = measureText(syllable);
+          if (syllableIdx === 0) {
+            width += extraWidth;
+          }
+          if (syllableIdx === syllables.length - 1 && isPunctuation) {
+            width -= overhangingPunctuationWidth;
+          }
           yield {
-            type: "glue",
-            width: width + extraWidth + (isFinalWord ? spaceWidth : 0.0),
-            penalty: penalty,
-            stretchability: 0.5 * width,
-            shrinkability: 0.3 * width,
+            type: "box",
+            width,
+            text: syllable,
           };
-        } else {
-          // All other text becomes boxes.
-          const syllables = word.split("\u00AD");
-          for (let syllableIdx = 0; syllableIdx < syllables.length; syllableIdx++) {
-            const syllable = syllables[syllableIdx];
-            let width = ctx.measureText(syllable).width;
-            if (syllableIdx === 0) {
-              width += extraWidth;
-            }
-            if (syllableIdx === syllables.length - 1 && isPunctuation) {
-              width -= overhangingPunctuationWidth;
-            }
+          if (syllableIdx !== syllables.length - 1) {
             yield {
-              type: "box",
-              width,
-              font,
-              text: syllable,
+              type: "penalty",
+              penalty: HYPHEN_PENALTY,
+              width: hyphenWidth,
+              flagged: true,
+              text: "-",
             };
-            if (syllableIdx !== syllables.length - 1) {
-              yield {
-                type: "penalty",
-                penalty: HYPHEN_PENALTY,
-                width: hyphenWidth,
-                flagged: true,
-                font,
-                text: "-",
-              };
-            }
           }
         }
-        prevWasPunctuation = isPunctuation;
       }
+      prevWasPunctuation = isPunctuation;
     }
-
-    // Finishing glue and forced line break.
-    yield {
-      type: "glue",
-      width: 0.0,
-      penalty: MAX_PENALTY,
-      stretchability: MAX_STRETCH,
-      shrinkability: 0.0,
-    };
-    yield { type: "penalty", width: 0.0, penalty: -MAX_PENALTY, flagged: true };
-  } finally {
-    ctx.restore();
   }
+
+  // Finishing glue and forced line break.
+  yield {
+    type: "glue",
+    width: 0.0,
+    penalty: MAX_PENALTY,
+    stretchability: MAX_STRETCH,
+    shrinkability: 0.0,
+  };
+  yield { type: "penalty", width: 0.0, penalty: -MAX_PENALTY, flagged: true };
 }
 
 interface RunningSum {
@@ -555,6 +557,16 @@ export const render = async (
   useOptimal: boolean,
   paraWidth: number,
 ) => {
+  // Get the device pixel ratio, falling back to 1.
+  var dpr = window.devicePixelRatio || 1;
+  // Get the size of the canvas in CSS pixels.
+  var rect = canvasEl.getBoundingClientRect();
+
+  // Give the canvas pixel dimensions of their CSS
+  // size * the device pixel ratio.
+  canvasEl.width = rect.width * dpr;
+  canvasEl.height = rect.height * dpr;
+
   // Use polyfilled segmenter if necessary.
   const wordSegmenter = await wordSegmenterPromise;
   const sentenceSegmenter = await sentenceSegmenterPromise;
@@ -568,10 +580,14 @@ export const render = async (
     console.error("Could not create 2d context.");
     return;
   }
+  // Scale all drawing operations by the dpr, so you
+  // don't have to worry about the difference.
+  ctx.scale(dpr, dpr);
 
   const fontSize = 20;
   const lineHeight = 1.2 * fontSize;
   const font = `${fontSize}px Roman`;
+  const measureText = makeCanvasMeasureText(ctx, font);
 
   ctx.fillStyle = "#eee";
   ctx.strokeStyle = "rgba(255, 0, 0, 0.25)";
@@ -587,7 +603,7 @@ export const render = async (
   let y = lineHeight;
   for (const text of paragraphs) {
     const paraItems = Array.from(
-      textToParagraphItems(text, ctx, font, sentenceSegmenter, wordSegmenter),
+      textToParagraphItems(text, measureText, sentenceSegmenter, wordSegmenter),
     );
 
     let lines: Line[];
@@ -620,8 +636,8 @@ export const render = async (
       for (let itemIndex = line.startIndex; itemIndex < line.endIndex; itemIndex++) {
         const item = paraItems[itemIndex];
         if (item.type === "box" || (itemIndex === line.endIndex - 1 && item.type === "penalty")) {
-          if (item.font && item.text && item.text !== "") {
-            ctx.font = item.font;
+          if (item.text && item.text !== "") {
+            ctx.font = font;
             ctx.fillText(item.text, x, y);
           }
           x += item.width;

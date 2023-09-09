@@ -44,7 +44,7 @@ function App() {
         <label htmlFor={widthId}>Paragraph width</label>
       </div>
       <div>
-        <canvas width="800" height="800" ref={setCanvasEl} />
+        <canvas style={{width: 800, height: 800}} width="800" height="800" ref={setCanvasEl} />
       </div>
     </div>
   );
