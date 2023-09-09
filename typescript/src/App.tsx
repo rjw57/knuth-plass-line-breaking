@@ -1,7 +1,7 @@
 import { useEffect, useState, useId } from "react";
 import "./App.css";
 
-import { render } from "./linebreaking";
+import { render } from "./canvasRendering";
 
 function App() {
   const optimalId = useId(),

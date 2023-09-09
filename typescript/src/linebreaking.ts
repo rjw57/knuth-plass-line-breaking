@@ -1,39 +1,4 @@
-import { hyphenateSync } from "hyphen/en";
 import { createIntlSegmenterPolyfill } from "intl-segmenter-polyfill/dist/bundled";
-
-const unwrap = (text: string) => text.replaceAll("\n", " ");
-const paragraphs = [
-  `I call our world Flatland, not because we call it so, but to make its nature clearer to you, my
-happy readers, who are privileged to live in Space.`,
-  `Imagine a vast sheet of paper on which straight Lines, Triangles, Squares, Pentagons, Hexagons,
-and other figures, instead of remaining fixed in their places, move freely about, on or in the
-surface, but without the power of rising above or sinking below it, very much like
-shadows\u00A0—\u00A0only hard with luminous edges\u00A0—\u00A0and you will then have a pretty
-correct notion of my country and countrymen. Alas, a few years ago, I should have said “my
-universe”:\u00A0but now my mind has been opened to higher views of things.`,
-  `In such a country, you will perceive at once that it is impossible that there should be anything
-of what you call a “solid” kind; but I dare say you will suppose that we could at least distinguish
-by sight the Triangles, Squares, and other figures, moving about as I have described them. On the
-contrary, we could see nothing of the kind, not at least so as to distinguish one figure from
-another. Nothing was visible, nor could be visible, to us, except Straight Lines; and the necessity
-of this I will speedily demonstrate.`,
-  `Place a penny on the middle of one of your tables in Space; and leaning over it, look down upon
-it. It will appear a circle.`,
-  `But now, drawing back to the edge of the table, gradually lower your eye (thus bringing yourself
-more and more into the condition of the inhabitants of Flatland), and you will find the penny
-becoming more and more oval to your view, and at last when you have placed your eye exactly on the
-edge of the table (so that you are, as it were, actually a Flatlander) the penny will then have
-ceased to appear oval at all, and will have become, so far as you can see, a straight line.`,
-  `The same thing would happen if you were to treat in the same way a Triangle, or a Square, or any
-other figure cut out from pasteboard. As soon as you look at it with your eye on the edge of the
-table, you will find that it ceases to appear to you as a figure, and that it becomes in appearance
-a straight line. Take for example an equilateral Triangle\u00A0—\u00A0who represents with us a
-Tradesman of the respectable class. Figure\u00A01 represents the Flatland Tradesman as you would
-see him while you were bending over him from above; figures\u00A02 and 3 represent the Tradesman,
-as you would see him if your eye were close to the level, or all but on the level of the table; and
-if your eye were quite on the level of the table (and that is how we see him in Flatland) you would
-see nothing but a straight line.`,
-].map((s) => hyphenateSync(unwrap(s)));
 
 const MAX_STRETCH = 100000;
 
@@ -41,13 +6,18 @@ const MAX_PENALTY = Infinity;
 const HYPHEN_PENALTY = 10.0;
 const LINE_PENALTY = 10.0;
 
-interface Box {
+export interface Font {
+  measureText: (text: string) => number;
+}
+
+export interface Box {
   type: "box";
   width: number;
   text: string;
+  font: Font;
 }
 
-interface Glue {
+export interface Glue {
   type: "glue";
   width: number;
   penalty: number;
@@ -55,40 +25,23 @@ interface Glue {
   shrinkability: number;
 }
 
-interface Penalty {
+export interface Penalty {
   type: "penalty";
   width: number;
   penalty: number;
   flagged: boolean;
   text?: string;
+  font?: Font;
 }
 
 export type ParagraphItem = Box | Glue | Penalty;
 
-export type MeasureTextFunc = (text: string) => number;
+export interface ParagraphInitialItemsOptions {
+  indentWidth?: number;
+}
 
-const makeCanvasMeasureText = (ctx: CanvasRenderingContext2D, font: string): MeasureTextFunc => (
-  (text: string) => {
-    ctx.save();
-    try {
-      ctx.font = font;
-      return ctx.measureText(text).width;
-    } finally {
-      ctx.restore();
-    }
-  }
-);
-
-function* textToParagraphItems(
-  text: string,
-  measureText: MeasureTextFunc,
-  sentenceSegmenter: Intl.Segmenter,
-  wordSegmenter: Intl.Segmenter,
-): Generator<ParagraphItem> {
-  const spaceWidth = measureText(" ")
-  const overhangingPunctuationWidth = 0.5 * spaceWidth;
-  const hyphenWidth = measureText("-") - overhangingPunctuationWidth;
-  const indentWidth = 8 * spaceWidth;
+export function* paragraphInitialItems(options?: ParagraphInitialItemsOptions): Generator<ParagraphItem> {
+  const { indentWidth } = { indentWidth: 0, ...options };
 
   // Starting glue
   yield {
@@ -98,6 +51,29 @@ function* textToParagraphItems(
     stretchability: 0.0,
     shrinkability: 0.0,
   };
+}
+
+export function* paragraphFinalItems(): Generator<ParagraphItem> {
+  // Finishing glue and forced line break.
+  yield {
+    type: "glue",
+    width: 0.0,
+    penalty: MAX_PENALTY,
+    stretchability: MAX_STRETCH,
+    shrinkability: 0.0,
+  };
+  yield { type: "penalty", width: 0.0, penalty: -MAX_PENALTY, flagged: true };
+}
+
+export function* paragraphItemsForText(
+  text: string,
+  font: Font,
+  sentenceSegmenter: Intl.Segmenter,
+  wordSegmenter: Intl.Segmenter,
+): Generator<ParagraphItem> {
+  const spaceWidth = font.measureText(" ");
+  const overhangingPunctuationWidth = 0.5 * spaceWidth;
+  const hyphenWidth = font.measureText("-") - overhangingPunctuationWidth;
 
   for (const { segment: sentence } of sentenceSegmenter.segment(text)) {
     let prevWasPunctuation = false;
@@ -123,7 +99,7 @@ function* textToParagraphItems(
         const syllables = word.split("\u00AD");
         for (let syllableIdx = 0; syllableIdx < syllables.length; syllableIdx++) {
           const syllable = syllables[syllableIdx];
-          let width = measureText(syllable);
+          let width = font.measureText(syllable);
           if (syllableIdx === 0) {
             width += extraWidth;
           }
@@ -134,6 +110,7 @@ function* textToParagraphItems(
             type: "box",
             width,
             text: syllable,
+            font,
           };
           if (syllableIdx !== syllables.length - 1) {
             yield {
@@ -142,6 +119,7 @@ function* textToParagraphItems(
               width: hyphenWidth,
               flagged: true,
               text: "-",
+              font,
             };
           }
         }
@@ -149,16 +127,6 @@ function* textToParagraphItems(
       prevWasPunctuation = isPunctuation;
     }
   }
-
-  // Finishing glue and forced line break.
-  yield {
-    type: "glue",
-    width: 0.0,
-    penalty: MAX_PENALTY,
-    stretchability: MAX_STRETCH,
-    shrinkability: 0.0,
-  };
-  yield { type: "penalty", width: 0.0, penalty: -MAX_PENALTY, flagged: true };
 }
 
 interface RunningSum {
@@ -544,118 +512,36 @@ export function* optimalBreaks(
   }
 }
 
+export const optimalBreaksWithFallback = (
+  paraItems: ParagraphItem[],
+  paraWidth: number,
+): Line[] => {
+  const params: OptimiserParameters = { upperAdjustmentRatio: 4.0 };
+  try {
+    // optimistic: no overfull boxes
+    return Array.from(optimalBreaks(paraItems, paraWidth, params));
+  } catch {
+    // Oh, dear. There was no solution, allow overfull boxes.
+  }
+  params.allowOverfull = true;
+  params.looseness = -2;
+  params.upperAdjustmentRatio = 10.0;
+  const lines = Array.from(optimalBreaks(paraItems, paraWidth, params));
+
+  // Did we end up with some overfull boxes despite our best effort?
+  const hasOverfull = lines.some((l) => l.isOverfull);
+  if (hasOverfull) {
+    params.emergencyStretch = 0.05 * paraWidth;
+    return Array.from(optimalBreaks(paraItems, paraWidth, params));
+  }
+
+  return lines;
+};
+
 // Use polyfilled segmenter if necessary.
 const getSegmenterClass = async () =>
   Intl.Segmenter ?? ((await createIntlSegmenterPolyfill()) as any as typeof Intl.Segmenter);
-const wordSegmenterPromise = (async () =>
+export const wordSegmenterPromise = (async () =>
   new (await getSegmenterClass())("en", { granularity: "word" }))();
-const sentenceSegmenterPromise = (async () =>
+export const sentenceSegmenterPromise = (async () =>
   new (await getSegmenterClass())("en", { granularity: "sentence" }))();
-
-export const render = async (
-  canvasEl: HTMLCanvasElement,
-  useOptimal: boolean,
-  paraWidth: number,
-) => {
-  // Get the device pixel ratio, falling back to 1.
-  var dpr = window.devicePixelRatio || 1;
-  // Get the size of the canvas in CSS pixels.
-  var rect = canvasEl.getBoundingClientRect();
-
-  // Give the canvas pixel dimensions of their CSS
-  // size * the device pixel ratio.
-  canvasEl.width = rect.width * dpr;
-  canvasEl.height = rect.height * dpr;
-
-  // Use polyfilled segmenter if necessary.
-  const wordSegmenter = await wordSegmenterPromise;
-  const sentenceSegmenter = await sentenceSegmenterPromise;
-
-  await Promise.all(Array.from(document.fonts).map((f) => f.status === "loaded" || f.load()));
-
-  const { width, height } = canvasEl;
-
-  const ctx = canvasEl.getContext("2d");
-  if (!ctx) {
-    console.error("Could not create 2d context.");
-    return;
-  }
-  // Scale all drawing operations by the dpr, so you
-  // don't have to worry about the difference.
-  ctx.scale(dpr, dpr);
-
-  const fontSize = 20;
-  const lineHeight = 1.2 * fontSize;
-  const font = `${fontSize}px Roman`;
-  const measureText = makeCanvasMeasureText(ctx, font);
-
-  ctx.fillStyle = "#eee";
-  ctx.strokeStyle = "rgba(255, 0, 0, 0.25)";
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.beginPath();
-  ctx.moveTo(fontSize, 0);
-  ctx.lineTo(fontSize, height);
-  ctx.moveTo(fontSize + paraWidth, 0);
-  ctx.lineTo(fontSize + paraWidth, height);
-  ctx.stroke();
-
-  let y = lineHeight;
-  for (const text of paragraphs) {
-    const paraItems = Array.from(
-      textToParagraphItems(text, measureText, sentenceSegmenter, wordSegmenter),
-    );
-
-    let lines: Line[];
-    if (useOptimal) {
-      const params: OptimiserParameters = { upperAdjustmentRatio: 4.0 };
-      try {
-        // optimistic: no overfull boxes
-        lines = Array.from(optimalBreaks(paraItems, paraWidth, params));
-      } catch {
-        // Oh, dear. There was no solution, allow overfull boxes.
-        params.allowOverfull = true;
-        params.looseness = -2;
-        params.upperAdjustmentRatio = 10.0;
-        lines = Array.from(optimalBreaks(paraItems, paraWidth, params));
-      }
-
-      // Did we end up with some overfull boxes despite our best effort?
-      const hasOverfull = lines.some((l) => l.isOverfull);
-      if (hasOverfull) {
-        params.emergencyStretch = 0.05 * paraWidth;
-        lines = Array.from(optimalBreaks(paraItems, paraWidth, params));
-      }
-    } else {
-      lines = Array.from(greedyBreaks(paraItems, paraWidth));
-    }
-
-    for (const line of lines) {
-      ctx.fillStyle = line.isOverfull ? "#800" : (line.isUnderfull ? "#008" : "#000");
-      let x = fontSize;
-      for (let itemIndex = line.startIndex; itemIndex < line.endIndex; itemIndex++) {
-        const item = paraItems[itemIndex];
-        if (item.type === "box" || (itemIndex === line.endIndex - 1 && item.type === "penalty")) {
-          if (item.text && item.text !== "") {
-            ctx.font = font;
-            ctx.fillText(item.text, x, y);
-          }
-          x += item.width;
-        } else if (item.type === "glue" && itemIndex !== line.endIndex - 1) {
-          x += item.width;
-          if (line.adjustmentRatio < 0) {
-            x += line.adjustmentRatio * item.shrinkability;
-          } else if (line.adjustmentRatio > 0) {
-            x += line.adjustmentRatio * item.stretchability;
-          }
-        }
-      }
-
-      ctx.font = `${fontSize * 0.8}px sans-serif`;
-      ctx.fillStyle = "#888";
-      ctx.fillText(`${line.adjustmentRatio.toFixed(2)}`, 2 * fontSize + paraWidth, y);
-
-      y += lineHeight;
-    }
-  }
-};
